@@ -1,0 +1,45 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx -y @redocly/cli@2 lint openapi.yaml
+      - name: Render with Redoc
+        run: |
+          mkdir -p _site
+          npx -y @redocly/cli@2 build-docs openapi.yaml --title "Tube2Vid API Reference" -o _site/index.html
+          # The canonical reference lives on tube2vid.com; this mirror must not compete with it in search.
+          sed -i 's|<head>|<head><link rel="canonical" href="https://tube2vid.com/docs">|' _site/index.html
+          grep -q 'rel="canonical"' _site/index.html
+          cp openapi.yaml _site/openapi.yaml
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

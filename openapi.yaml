@@ -1,0 +1,784 @@
+openapi: 3.1.0
+info:
+  title: Tube2Vid API
+  version: 1.1.0
+  summary: Download video, audio and images from 1,800+ sites.
+  description: |
+    Downloads are asynchronous: submit a job, poll it until it is `completed` or `failed`,
+    then fetch the file from the download endpoint, which redirects to a short-lived signed URL.
+
+    Authenticated routes take `Authorization: Bearer tv_live_...`. Create keys in the dashboard
+    at https://tube2vid.com/dashboard. Each key carries scopes; a route's required scope is listed
+    in its description. Browser sessions use the same header with an Atlas session token.
+
+    Errors are JSON with an `error` field and, for some, a machine-readable `code`.
+  license:
+    name: MIT
+    identifier: MIT
+security:
+  - bearerAuth: []
+servers:
+  - url: https://tube2vid.com
+tags:
+  - name: Jobs
+    description: Submit downloads and fetch results with an API key.
+  - name: Public jobs
+    description: The anonymous browser flow used by tube2vid.com (needs a solved work challenge).
+  - name: Platforms
+    description: Supported platforms and their live health.
+  - name: Account
+    description: Usage, API keys and credit purchases.
+  - name: Status
+    description: Service health and operational metrics.
+
+paths:
+  /healthz:
+    get:
+      tags: [Status]
+      operationId: getHealth
+      security: []
+      summary: Liveness check
+      responses:
+        "200":
+          description: The API is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceHealth" }
+
+  /v1/platforms:
+    get:
+      tags: [Platforms]
+      operationId: listPlatforms
+      security: []
+      summary: First-class platforms
+      description: The first-class platforms and their provider chains. Any other site yt-dlp supports is also accepted by job submission.
+      responses:
+        "200":
+          description: Platforms.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PlatformSummary" }
+
+  /v1/platforms/health:
+    get:
+      tags: [Platforms]
+      operationId: getPlatformHealth
+      security: []
+      summary: Live platform health
+      responses:
+        "200":
+          description: One row per first-class platform.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PlatformHealthRow" }
+
+  /v1/status/history:
+    get:
+      tags: [Status]
+      operationId: getStatusHistory
+      security: []
+      summary: Recent platform probe results
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: platform
+          in: query
+          description: Only rows for this platform slug.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Probe results, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/StatusHistoryItem" }
+
+  /v1/ops/metrics:
+    get:
+      tags: [Status]
+      operationId: getOperationalMetrics
+      security: []
+      summary: Queue and failure metrics
+      responses:
+        "200":
+          description: Current metrics.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationalMetrics" }
+
+  /v1/public/recent-downloads:
+    get:
+      tags: [Status]
+      operationId: getRecentDownloads
+      security: []
+      summary: Recent anonymous downloads
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 30, default: 18 }
+      responses:
+        "200":
+          description: Recent downloads.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecentDownload" }
+
+  /v1/challenges/pow:
+    get:
+      tags: [Public jobs]
+      operationId: getPowChallenge
+      security: []
+      summary: Get a work challenge
+      description: |
+        A challenge for `POST /v1/public/jobs`, valid for two minutes. Solve it by finding any
+        `solution` string such that the hex SHA-256 of `{nonce}.{expiresAt}.{difficulty}.{solution}`
+        starts with `difficulty` zeros, then send the challenge fields plus `solution` as `pow`.
+      responses:
+        "200":
+          description: A signed challenge.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PowChallenge" }
+
+  /v1/public/jobs:
+    post:
+      tags: [Public jobs]
+      operationId: submitPublicJob
+      security: []
+      summary: Submit an anonymous download
+      description: |
+        The flow the website uses. Requires a solved `pow` and, where the human check is enabled,
+        a Cloudflare Turnstile `turnstileToken`, so it is not meant for scripts: use `POST /v1/jobs`
+        with an API key instead. Free; an identical submission within a minute returns the
+        existing job with `deduped: true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobSubmit" }
+      responses:
+        "200":
+          description: Queued (or deduplicated onto a recent identical job).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueuedJob" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: "Human check or work challenge failed (`code`: `turnstile_failed` or `pow_failed`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/QueueUnavailable" }
+
+  /v1/public/jobs/{jobId}:
+    get:
+      tags: [Public jobs]
+      operationId: getPublicJobStatus
+      security: []
+      summary: Anonymous job status
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          description: Job status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicJobStatus" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/public/jobs/{jobId}/download:
+    get:
+      tags: [Public jobs]
+      operationId: downloadPublicJob
+      security: []
+      summary: Download an anonymous job's file
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "302": { $ref: "#/components/responses/SignedRedirect" }
+        "200": { $ref: "#/components/responses/FileStream" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotReady" }
+        "410": { $ref: "#/components/responses/Expired" }
+        "503": { $ref: "#/components/responses/StorageUnavailable" }
+
+  /v1/public/jobs/{jobId}/thumbnail:
+    get:
+      tags: [Public jobs]
+      operationId: getPublicJobThumbnail
+      security: []
+      summary: An anonymous job's thumbnail
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "302":
+          description: Redirect to the thumbnail image.
+          headers:
+            Location: { schema: { type: string, format: uri } }
+        "200":
+          description: The thumbnail.
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs:
+    post:
+      tags: [Jobs]
+      operationId: submitJob
+      summary: Submit a download
+      description: |
+        Scope `jobs:write`. Reserves the estimated credits and queues the job. The platform is
+        detected from the URL unless `platform` is given. `turnstileToken` and `pow` are only
+        checked for browser sessions, not for API keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobSubmit" }
+            example:
+              url: https://www.youtube.com/watch?v=dQw4w9WgXcQ
+              mode: auto
+              format: mp4
+              quality: best
+      responses:
+        "200":
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueuedJob" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: Not enough credits.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    required: [creditBalance, requiredCredits]
+                    properties:
+                      creditBalance: { type: integer }
+                      requiredCredits: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/QueueUnavailable" }
+
+  /v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      operationId: getJobStatus
+      summary: Job status
+      description: Scope `jobs:read`. Only the job's owner can read it.
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs/{jobId}/events:
+    get:
+      tags: [Jobs]
+      operationId: getJobEvents
+      summary: Job event log
+      description: Scope `jobs:read`.
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200":
+          description: Events, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/JobEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs/{jobId}/download:
+    get:
+      tags: [Jobs]
+      operationId: downloadJob
+      summary: Download a job's file
+      description: |
+        Scope `jobs:read`. Redirects to a short-lived signed URL. Do not forward your
+        `Authorization` header to that URL (curl does not by default).
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "302": { $ref: "#/components/responses/SignedRedirect" }
+        "200": { $ref: "#/components/responses/FileStream" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotReady" }
+        "410": { $ref: "#/components/responses/Expired" }
+        "503": { $ref: "#/components/responses/StorageUnavailable" }
+
+  /v1/usage:
+    get:
+      tags: [Account]
+      operationId: getUsage
+      summary: Credit balance and job counts
+      description: Scope `usage:read`.
+      responses:
+        "200":
+          description: Usage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/api-keys:
+    get:
+      tags: [Account]
+      operationId: listApiKeys
+      summary: List API keys
+      description: Scope `keys:read`.
+      responses:
+        "200":
+          description: Keys (never the secret itself).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ApiKeySummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Account]
+      operationId: createApiKey
+      summary: Create an API key
+      description: Scope `keys:write`. The plaintext `key` is returned only in this response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApiKeyCreate" }
+      responses:
+        "200":
+          description: The new key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedApiKey" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/billing/checkout:
+    post:
+      tags: [Account]
+      operationId: createCheckout
+      summary: Start a credit purchase
+      description: Scope `billing:write`. Returns a Stripe Checkout URL to open in a browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutCreate" }
+      responses:
+        "200":
+          description: Checkout session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: "Stripe is unavailable (`code`: `stripe_checkout_failed`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A `tv_live_...` API key.
+
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: The body failed validation; `error` holds the field errors.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                oneOf:
+                  - type: string
+                  - type: object
+                    properties:
+                      formErrors: { type: array, items: { type: string } }
+                      fieldErrors:
+                        type: object
+                        additionalProperties: { type: array, items: { type: string } }
+              code: { type: string, examples: [unsupported_platform] }
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The key lacks the required scope, or the job belongs to someone else.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotReady:
+      description: The job has not completed yet.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Expired:
+      description: The file was swept by retention.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    StorageUnavailable:
+      description: Object storage is not configured.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    QueueUnavailable:
+      description: The job was recorded but could not be queued; retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    SignedRedirect:
+      description: Redirect to a short-lived signed URL for the file.
+      headers:
+        Location: { schema: { type: string, format: uri } }
+    FileStream:
+      description: The file itself, when the API serves it directly (deployments without object storage).
+      headers:
+        Content-Disposition: { schema: { type: string } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string }
+        message: { type: string }
+
+    JobMode:
+      type: string
+      enum: [auto, video, audio, gallery]
+
+    JobState:
+      type: string
+      enum: [queued, running, completed, failed]
+
+    JobSubmit:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri, maxLength: 1000 }
+        platform:
+          type: string
+          minLength: 1
+          maxLength: 90
+          description: Force a platform slug from /v1/platforms (or `yt-dlp-network`) instead of detecting it.
+        mode:
+          $ref: "#/components/schemas/JobMode"
+          default: auto
+        format: { type: string, minLength: 2, maxLength: 30, default: mp4, examples: [mp4, mp3] }
+        quality: { type: string, minLength: 2, maxLength: 30, default: best, examples: [best, 720p] }
+        turnstileToken: { type: string, maxLength: 4096, description: Browser flow only. }
+        pow: { $ref: "#/components/schemas/PowSolution" }
+
+    PowChallenge:
+      type: object
+      required: [nonce, expiresAt, difficulty, signature]
+      properties:
+        nonce: { type: string }
+        expiresAt: { type: string, format: date-time }
+        difficulty: { type: integer, minimum: 1, maximum: 8 }
+        signature: { type: string }
+
+    PowSolution:
+      description: Browser flow only. A challenge from /v1/challenges/pow plus its solution.
+      allOf:
+        - $ref: "#/components/schemas/PowChallenge"
+        - type: object
+          required: [solution]
+          properties:
+            solution: { type: string, minLength: 1, maxLength: 64 }
+
+    QueuedJob:
+      type: object
+      required: [jobId, status, platform, estimatedCredits]
+      properties:
+        jobId: { type: string, format: uuid }
+        status:
+          $ref: "#/components/schemas/JobState"
+          description: "`queued` for a new job; a deduplicated public job reports its current state."
+        platform: { type: string }
+        estimatedCredits: { type: integer, description: Credits reserved (0 for public jobs). }
+        deduped: { type: boolean }
+
+    Job:
+      type: object
+      required: [id, url, platform, mode, format, quality, creditsReserved, status, progress, creditsCharged, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        jobId: { type: string, format: uuid }
+        userId: { type: string }
+        apiKeyId: { type: string }
+        url: { type: string, description: The submitted URL after normalisation. }
+        platform: { type: string }
+        mode: { $ref: "#/components/schemas/JobMode" }
+        format: { type: string }
+        quality: { type: string }
+        creditsReserved: { type: integer }
+        status: { $ref: "#/components/schemas/JobState" }
+        progress: { type: number, minimum: 0, maximum: 100 }
+        creditsCharged: { type: integer }
+        provider: { type: string }
+        title: { type: string }
+        outputPath: { type: string }
+        outputStorageKey: { type: string }
+        outputSize: { type: integer, description: Bytes. }
+        thumbnailUrl: { type: string, format: uri }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        completedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PublicJobStatus:
+      type: object
+      required: [jobId, platform, status, progress, createdAt, updatedAt]
+      properties:
+        jobId: { type: string, format: uuid }
+        platform: { type: string }
+        status: { $ref: "#/components/schemas/JobState" }
+        progress: { type: number, minimum: 0, maximum: 100 }
+        provider: { type: string }
+        fallback: { type: boolean, description: The file came from a reduced-quality last-resort provider. }
+        title: { type: string }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        completedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        latestEvent:
+          type: object
+          required: [stage, createdAt]
+          properties:
+            stage: { type: string }
+            message: { type: string }
+            details: { type: [object, "null"] }
+            createdAt: { type: string, format: date-time }
+
+    JobEvent:
+      type: object
+      required: [id, jobId, stage, message, createdAt]
+      properties:
+        id: { type: string }
+        jobId: { type: string, format: uuid }
+        stage: { type: string, examples: [queued, worker_received, provider_attempt_started, job_artifacts_uploaded] }
+        message: { type: string }
+        details: { type: [object, "null"] }
+        createdAt: { type: string, format: date-time }
+
+    PlatformSummary:
+      type: object
+      required: [slug, name, category, supportLevel, publicClaim, capabilities, providers]
+      properties:
+        slug: { type: string, examples: [youtube] }
+        name: { type: string }
+        category: { type: string }
+        supportLevel: { type: string, enum: [stable, beta, experimental] }
+        publicClaim: { type: boolean }
+        capabilities: { type: array, items: { type: string } }
+        providers:
+          type: array
+          items:
+            type: object
+            required: [id, kind, priority]
+            properties:
+              id: { type: string }
+              kind: { type: string, enum: [yt-dlp, gallery-dl, you-get, lux, streamlink, yutto, native, external-service] }
+              priority: { type: integer }
+
+    PlatformHealthRow:
+      type: object
+      required: [platform, name, category, supportLevel, status, auditCategory]
+      properties:
+        platform: { type: string }
+        name: { type: string }
+        category: { type: string }
+        supportLevel: { type: string }
+        status: { type: string, enum: [operational, degraded, partial_outage, down, beta] }
+        auditCategory: { type: string, enum: [working, auth_needed, broken, unknown] }
+        provider: { type: string }
+        providerKind: { type: string }
+        successRate: { type: number }
+        medianExtractMs: { type: number }
+        lastCheckedAt: { type: string, format: date-time }
+        note: { type: string }
+        reason: { type: string }
+        authNeeded: { type: boolean }
+        repaired: { type: boolean }
+
+    StatusHistoryItem:
+      type: object
+      required: [id, platform, provider, status, createdAt]
+      properties:
+        id: { type: string }
+        platform: { type: string }
+        provider: { type: string }
+        status: { type: string }
+        durationMs: { type: number }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    OperationalMetrics:
+      type: object
+      required: [generatedAt, queueDepth, queuedJobs, runningJobs, completedJobs24h, failedJobs24h, providerFailureRates, alerts]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        queueDepth: { type: integer }
+        queuedJobs: { type: integer }
+        runningJobs: { type: integer }
+        completedJobs24h: { type: integer }
+        failedJobs24h: { type: integer }
+        p95JobDurationMs: { type: number }
+        providerFailureRates:
+          type: array
+          items:
+            type: object
+            required: [provider, total, failed, failureRate]
+            properties:
+              provider: { type: string }
+              total: { type: integer }
+              failed: { type: integer }
+              failureRate: { type: number, minimum: 0, maximum: 1 }
+        alerts:
+          type: array
+          items:
+            type: object
+            required: [level, code, message]
+            properties:
+              level: { type: string, enum: [info, warn, critical] }
+              code: { type: string }
+              message: { type: string }
+
+    RecentDownload:
+      type: object
+      required: [platform, mode, format, status, createdAt]
+      properties:
+        platform: { type: string }
+        title: { type: string }
+        sourceUrl: { type: string }
+        mode: { type: string }
+        format: { type: string }
+        status: { type: string }
+        thumbnailUrl: { type: string, format: uri }
+        createdAt: { type: string, format: date-time }
+
+    ServiceHealth:
+      type: object
+      required: [ok, service, time]
+      properties:
+        ok: { type: boolean }
+        service: { type: string }
+        time: { type: string, format: date-time }
+
+    Usage:
+      type: object
+      required: [creditBalance, jobsTotal, jobsCompleted, jobsFailed]
+      properties:
+        creditBalance: { type: integer }
+        jobsTotal: { type: integer }
+        jobsCompleted: { type: integer }
+        jobsFailed: { type: integer }
+
+    ApiKeyScope:
+      type: string
+      enum: [jobs:write, jobs:read, usage:read, keys:read, keys:write, billing:write]
+
+    ApiKeyCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/ApiKeyScope" }
+          default: [jobs:write, jobs:read, usage:read]
+        rateLimitPerMinute: { type: integer, minimum: 1, maximum: 1000, default: 60 }
+
+    CreatedApiKey:
+      type: object
+      required: [id, name, key, prefix, scopes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        key: { type: string, description: "The secret `tv_live_...` key. Shown once." }
+        prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+
+    ApiKeySummary:
+      type: object
+      required: [id, name, prefix, scopes, rateLimitPerMinute, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+        rateLimitPerMinute: { type: integer }
+        revokedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    CheckoutCreate:
+      type: object
+      description: Give `credits` (or a legacy `pack`).
+      properties:
+        credits: { type: integer, minimum: 1000, maximum: 250000 }
+        pack: { type: string, enum: [starter, builder, scale], deprecated: true }
+
+    CheckoutSession:
+      type: object
+      required: [checkoutUrl, mode, credits, amountCents]
+      properties:
+        checkoutUrl: { type: [string, "null"], format: uri }
+        mode: { type: string, enum: [stripe, placeholder] }
+        sessionId: { type: string }
+        credits: { type: integer }
+        amountCents: { type: integer }
+        message: { type: string }
