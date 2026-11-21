@@ -60,7 +60,7 @@ curl -s https://tube2vid.com/v1/ops/metrics
 curl -s https://tube2vid.com/healthz
 ```
 
-`POST /v1/public/jobs` is the anonymous flow the website uses. It needs a solved work challenge from `GET /v1/challenges/pow` and a Cloudflare Turnstile token, so scripts should use `POST /v1/jobs` with a key.
+`POST /v1/public/jobs` is the anonymous flow the website uses. It needs an Atlas captcha token solved in the browser on tube2vid.com, so scripts should use `POST /v1/jobs` with a key.
 
 ## Errors
 

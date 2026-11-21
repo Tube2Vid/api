@@ -113,23 +113,6 @@ paths:
               schema: { $ref: "#/components/schemas/OperationalMetrics" }
 
 
-  /v1/challenges/pow:
-    get:
-      tags: [Public jobs]
-      operationId: getPowChallenge
-      security: []
-      summary: Get a work challenge
-      description: |
-        A challenge for `POST /v1/public/jobs`, valid for two minutes. Solve it by finding any
-        `solution` string such that the hex SHA-256 of `{nonce}.{expiresAt}.{difficulty}.{solution}`
-        starts with `difficulty` zeros, then send the challenge fields plus `solution` as `pow`.
-      responses:
-        "200":
-          description: A signed challenge.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/PowChallenge" }
-
   /v1/public/jobs:
     post:
       tags: [Public jobs]
@@ -137,9 +120,9 @@ paths:
       security: []
       summary: Submit an anonymous download
       description: |
-        The flow the website uses. Requires a solved `pow` and, where the human check is enabled,
-        a Cloudflare Turnstile `turnstileToken`, so it is not meant for scripts: use `POST /v1/jobs`
-        with an API key instead. Free; an identical submission within a minute returns the
+        The flow the website uses. Requires `captchaToken`, an Atlas captcha token for the action
+        `download` (single use, five minutes, solved in the browser on tube2vid.com), so it is not
+        meant for scripts: use `POST /v1/jobs` with an API key instead. Free; an identical submission within a minute returns the
         existing job with `deduped: true`.
       requestBody:
         required: true
@@ -154,7 +137,7 @@ paths:
               schema: { $ref: "#/components/schemas/QueuedJob" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "403":
-          description: "Human check or work challenge failed (`code`: `turnstile_failed` or `pow_failed`)."
+          description: "Human check failed (`code`: `captcha_failed`)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -219,7 +202,7 @@ paths:
       summary: Submit a download
       description: |
         Scope `jobs:write`. Reserves the estimated credits and queues the job. The platform is
-        detected from the URL unless `platform` is given. `turnstileToken` and `pow` are only
+        detected from the URL unless `platform` is given. `captchaToken` is only
         checked for browser sessions, not for API keys.
       requestBody:
         required: true
@@ -498,26 +481,7 @@ components:
           default: auto
         format: { type: string, minLength: 2, maxLength: 30, default: mp4, examples: [mp4, mp3] }
         quality: { type: string, minLength: 2, maxLength: 30, default: best, examples: [best, 720p] }
-        turnstileToken: { type: string, maxLength: 4096, description: Browser flow only. }
-        pow: { $ref: "#/components/schemas/PowSolution" }
-
-    PowChallenge:
-      type: object
-      required: [nonce, expiresAt, difficulty, signature]
-      properties:
-        nonce: { type: string }
-        expiresAt: { type: string, format: date-time }
-        difficulty: { type: integer, minimum: 1, maximum: 8 }
-        signature: { type: string }
-
-    PowSolution:
-      description: Browser flow only. A challenge from /v1/challenges/pow plus its solution.
-      allOf:
-        - $ref: "#/components/schemas/PowChallenge"
-        - type: object
-          required: [solution]
-          properties:
-            solution: { type: string, minLength: 1, maxLength: 64 }
+        captchaToken: { type: string, maxLength: 4096, description: "Browser flow only: an Atlas captcha token for the action `download`." }
 
     QueuedJob:
       type: object
